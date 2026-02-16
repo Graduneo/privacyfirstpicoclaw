@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PicoClaw - Privacy-First AI Assistant</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🦎 PicoClaw</h1>
+            <p class="tagline">Privacy-First AI Assistant</p>
+        </header>
+
+        <div class="controls">
+            <div class="control-group">
+                <label for="provider">Provider:</label>
+                <select id="provider">
+                    <option value="ollama">Ollama (Local)</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="openai">OpenAI</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label for="model">Model:</label>
+                <select id="model">
+                    <option value="">Loading...</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="streaming" checked>
+                    Enable Streaming
+                </label>
+            </div>
+
+            <button id="clearBtn" class="btn-secondary">Clear Chat</button>
+        </div>
+
+        <div id="chat" class="chat-container">
+            <div class="welcome-message">
+                <h2>Welcome to PicoClaw! 🦎</h2>
+                <p>Your privacy-first AI assistant. All data stays local when using Ollama.</p>
+                <ul>
+                    <li><strong>Ollama (Local):</strong> Runs on your machine - maximum privacy</li>
+                    <li><strong>OpenRouter/OpenAI:</strong> Cloud APIs (requires API key)</li>
+                </ul>
+                <p>Start typing below to begin your conversation!</p>
+            </div>
+        </div>
+
+        <div class="input-container">
+            <div class="system-prompt-toggle">
+                <button id="systemPromptBtn" class="btn-small">⚙️ System Prompt</button>
+            </div>
+            <textarea id="systemPrompt" class="system-prompt" placeholder="Optional system prompt..."></textarea>
+            <textarea id="userInput" placeholder="Type your message here..." rows="2"></textarea>
+            <button id="sendBtn" class="btn-primary">Send</button>
+        </div>
+
+        <div class="status">
+            <span id="statusText">Ready</span>
+            <span id="providerStatus" class="provider-badge"></span>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
