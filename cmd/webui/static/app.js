@@ -4,11 +4,13 @@ class PicoClawApp {
         this.messages = [];
         this.isStreaming = false;
         this.abortController = null;
-        this.sessionKey = 'webui:' + Date.now();
+        this.sessionKey = localStorage.getItem('picoclaw_session') || 'webui:' + Date.now();
+        localStorage.setItem('picoclaw_session', this.sessionKey);
         
         this.initElements();
         this.attachEventListeners();
         this.loadModels();
+        this.loadSessions();
     }
 
     initElements() {
@@ -23,7 +25,12 @@ class PicoClawApp {
             statusText: document.getElementById('statusText'),
             providerStatus: document.getElementById('providerStatus'),
             systemPrompt: document.getElementById('systemPrompt'),
-            systemPromptBtn: document.getElementById('systemPromptBtn')
+            systemPromptBtn: document.getElementById('systemPromptBtn'),
+            sessionsBtn: document.getElementById('sessionsBtn'),
+            sessionsPanel: document.getElementById('sessionsPanel'),
+            sessionsList: document.getElementById('sessionsList'),
+            newChatBtn: document.getElementById('newChatBtn'),
+            closeSessionsBtn: document.getElementById('closeSessionsBtn')
         };
     }
 
@@ -40,6 +47,11 @@ class PicoClawApp {
         this.elements.systemPromptBtn.addEventListener('click', () => {
             this.elements.systemPrompt.classList.toggle('show');
         });
+        
+        // Session management
+        this.elements.sessionsBtn.addEventListener('click', () => this.toggleSessionsPanel());
+        this.elements.newChatBtn.addEventListener('click', () => this.startNewChat());
+        this.elements.closeSessionsBtn.addEventListener('click', () => this.toggleSessionsPanel());
     }
 
     async loadModels() {
@@ -85,6 +97,142 @@ class PicoClawApp {
         }
     }
 
+    async loadSessions() {
+        try {
+            const response = await fetch('/api/sessions');
+            const sessions = await response.json();
+            this.renderSessionsList(sessions);
+        } catch (error) {
+            console.error('Failed to load sessions:', error);
+        }
+    }
+
+    renderSessionsList(sessions) {
+        this.elements.sessionsList.innerHTML = '';
+        
+        if (sessions.length === 0) {
+            this.elements.sessionsList.innerHTML = '<p class="no-sessions">No previous conversations</p>';
+            return;
+        }
+
+        sessions.forEach(session => {
+            const sessionDiv = document.createElement('div');
+            sessionDiv.className = 'session-item';
+            
+            const date = new Date(session.updated * 1000);
+            const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            
+            sessionDiv.innerHTML = `
+                <div class="session-info">
+                    <span class="session-messages">${session.messages} messages</span>
+                    <span class="session-date">${dateStr}</span>
+                </div>
+                <div class="session-actions">
+                    <button class="load-session-btn" data-key="${session.key}" title="Load conversation">
+                        <span>📂</span>
+                    </button>
+                    <button class="delete-session-btn" data-key="${session.key}" title="Delete conversation">
+                        <span>🗑️</span>
+                    </button>
+                </div>
+            `;
+            
+            // Load session
+            sessionDiv.querySelector('.load-session-btn').addEventListener('click', async () => {
+                await this.loadSession(session.key);
+            });
+            
+            // Delete session
+            sessionDiv.querySelector('.delete-session-btn').addEventListener('click', async () => {
+                if (confirm('Delete this conversation?')) {
+                    await this.deleteSession(session.key);
+                }
+            });
+            
+            this.elements.sessionsList.appendChild(sessionDiv);
+        });
+    }
+
+    async loadSession(sessionKey) {
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionKey)}`);
+            if (!response.ok) {
+                throw new Error('Failed to load session');
+            }
+            
+            const messages = await response.json();
+            this.sessionKey = sessionKey;
+            localStorage.setItem('picoclaw_session', sessionKey);
+            this.messages = messages;
+            
+            // Clear and reload chat display
+            this.elements.chat.innerHTML = '';
+            this.messages.forEach(msg => {
+                this.addMessage(msg.role, msg.content, false);
+            });
+            
+            this.toggleSessionsPanel();
+            this.updateStatus(`Loaded conversation with ${messages.length} messages`);
+            this.scrollToBottom();
+            
+            // Refresh sessions list
+            this.loadSessions();
+        } catch (error) {
+            console.error('Failed to load session:', error);
+            this.updateStatus('Failed to load conversation');
+        }
+    }
+
+    async deleteSession(sessionKey) {
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionKey)}`, {
+                method: 'DELETE'
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to delete session');
+            }
+            
+            // If we deleted the current session, start fresh
+            if (sessionKey === this.sessionKey) {
+                this.startNewChat();
+            }
+            
+            // Refresh sessions list
+            this.loadSessions();
+            this.updateStatus('Conversation deleted');
+        } catch (error) {
+            console.error('Failed to delete session:', error);
+            this.updateStatus('Failed to delete conversation');
+        }
+    }
+
+    startNewChat() {
+        this.sessionKey = 'webui:' + Date.now();
+        localStorage.setItem('picoclaw_session', this.sessionKey);
+        this.messages = [];
+        this.elements.chat.innerHTML = `
+            <div class="welcome-message">
+                <h2>Welcome to PicoClaw! 🦞</h2>
+                <p>Your privacy-first AI assistant. All data stays local when using Ollama.</p>
+                <ul>
+                    <li><strong>Ollama (Local):</strong> Runs on your machine - maximum privacy</li>
+                    <li><strong>OpenRouter/OpenAI:</strong> Cloud APIs (requires API key)</li>
+                </ul>
+                <p>Start typing below to begin your conversation!</p>
+            </div>
+        `;
+        this.updateStatus('New conversation started');
+        this.toggleSessionsPanel();
+    }
+
+    toggleSessionsPanel() {
+        this.elements.sessionsPanel.classList.toggle('show');
+        if (this.elements.sessionsPanel.classList.contains('show')) {
+            this.loadSessions();
+        }
+    }
+
     async sendMessage() {
         const content = this.elements.userInput.value.trim();
         if (!content || this.isStreaming) return;
@@ -117,6 +265,9 @@ class PicoClawApp {
             } else {
                 await this.nonStreamResponse(provider, model, content, systemPrompt, contentDiv, typingIndicator);
             }
+            
+            // Refresh sessions list after message
+            this.loadSessions();
         } catch (error) {
             contentDiv.innerHTML = `<span class="error">Error: ${error.message}</span>`;
         } finally {
@@ -264,7 +415,7 @@ class PicoClawApp {
         }
     }
 
-    addMessage(role, content) {
+    addMessage(role, content, scroll = true) {
         // Remove welcome message if exists
         const welcome = this.elements.chat.querySelector('.welcome-message');
         if (welcome) {
@@ -280,13 +431,15 @@ class PicoClawApp {
         
         const iconDiv = document.createElement('div');
         iconDiv.className = 'message-icon';
-        iconDiv.textContent = role === 'user' ? '👤' : '🦎';
+        iconDiv.textContent = role === 'user' ? '👤' : '🦞';
         
         messageDiv.appendChild(iconDiv);
         messageDiv.appendChild(contentDiv);
         this.elements.chat.appendChild(messageDiv);
         
-        this.scrollToBottom();
+        if (scroll) {
+            this.scrollToBottom();
+        }
         
         return messageDiv;
     }
@@ -333,7 +486,7 @@ class PicoClawApp {
             this.messages = [];
             this.elements.chat.innerHTML = `
                 <div class="welcome-message">
-                    <h2>Welcome to PicoClaw! 🦎</h2>
+                    <h2>Welcome to PicoClaw! 🦞</h2>
                     <p>Your privacy-first AI assistant. All data stays local when using Ollama.</p>
                     <ul>
                         <li><strong>Ollama (Local):</strong> Runs on your machine - maximum privacy</li>

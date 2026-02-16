@@ -9,8 +9,13 @@
 <body>
     <div class="container">
         <header>
-            <h1>🦎 PicoClaw</h1>
-            <p class="tagline">Privacy-First AI Assistant</p>
+            <div class="header-left">
+                <h1>🦞 PicoClaw</h1>
+                <p class="tagline">Privacy-First AI Assistant</p>
+            </div>
+            <button id="sessionsBtn" class="btn-icon" title="Conversation History">
+                📚 History
+            </button>
         </header>
 
         <div class="controls">
@@ -42,7 +47,7 @@
 
         <div id="chat" class="chat-container">
             <div class="welcome-message">
-                <h2>Welcome to PicoClaw! 🦎</h2>
+                <h2>Welcome to PicoClaw! 🦞</h2>
                 <p>Your privacy-first AI assistant. All data stays local when using Ollama.</p>
                 <ul>
                     <li><strong>Ollama (Local):</strong> Runs on your machine - maximum privacy</li>
@@ -64,6 +69,18 @@
         <div class="status">
             <span id="statusText">Ready</span>
             <span id="providerStatus" class="provider-badge"></span>
+        </div>
+    </div>
+
+    <!-- Sessions Panel -->
+    <div id="sessionsPanel" class="sessions-panel">
+        <div class="sessions-header">
+            <h2>📚 Conversation History</h2>
+            <button id="newChatBtn" class="btn-primary">+ New Chat</button>
+            <button id="closeSessionsBtn" class="btn-icon" title="Close">✕</button>
+        </div>
+        <div id="sessionsList" class="sessions-list">
+            <p class="loading">Loading conversations...</p>
         </div>
     </div>
 

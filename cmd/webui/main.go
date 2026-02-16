@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 //go:embed static
@@ -63,10 +66,17 @@ type ModelsResponse struct {
 	Models   []string `json:"models"`
 }
 
+// SessionInfo represents a session for the frontend
+type SessionInfo struct {
+	Key      string `json:"key"`
+	Messages int    `json:"messages"`
+	Updated  int64  `json:"updated"`
+}
+
 // ProviderWrapper wraps LLMProvider with additional metadata
 type ProviderWrapper struct {
-	name    string
-	provider providers.LLMProvider
+	name        string
+	provider    providers.LLMProvider
 	listModelsFn func(ctx context.Context) ([]string, error)
 }
 
@@ -83,14 +93,14 @@ func (p *ProviderWrapper) StreamChat(ctx context.Context, req *StreamChatRequest
 	chunkChan := make(chan StreamChunk, 1)
 	go func() {
 		defer close(chunkChan)
-		
+
 		messages := req.Messages
 		resp, err := p.provider.Chat(ctx, messages, nil, req.Model, nil)
 		if err != nil {
 			chunkChan <- StreamChunk{Error: err}
 			return
 		}
-		
+
 		// Send the full response as one chunk
 		chunkChan <- StreamChunk{
 			Content: resp.Content,
@@ -128,8 +138,10 @@ var (
 	cfg              *config.Config
 	agentLoop        *agent.AgentLoop
 	msgBus           *bus.MessageBus
+	sessions         *session.SessionManager
 	providerMap      = make(map[string]*ProviderWrapper)
 	mu               sync.RWMutex
+	sessionStoragePath string
 )
 
 func main() {
@@ -152,6 +164,11 @@ func main() {
 	// Initialize message bus
 	msgBus = bus.NewMessageBus()
 
+	// Initialize session manager with storage path
+	sessionStoragePath = filepath.Join(home, ".picoclaw", "sessions")
+	sessions = session.NewSessionManager(sessionStoragePath)
+	log.Printf("Session storage: %s", sessionStoragePath)
+
 	// Initialize providers
 	initializeProviders()
 
@@ -167,6 +184,8 @@ func main() {
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/api/chat", handleChat)
 	http.HandleFunc("/api/models", handleModels)
+	http.HandleFunc("/api/sessions", handleSessions)
+	http.HandleFunc("/api/sessions/", handleSessionDetail)
 	http.HandleFunc("/ws", handleWebSocket)
 
 	// Serve static files
@@ -209,7 +228,7 @@ func initializeProviders() {
 	if cfg.Providers.VLLM.APIBase != "" {
 		ollamaBaseURL = cfg.Providers.VLLM.APIBase
 	}
-	
+
 	ollamaProvider, err := providers.CreateOllamaProvider(ollamaBaseURL)
 	if err == nil {
 		// Test connection
@@ -249,7 +268,7 @@ func initializeProviders() {
 func getAvailableProviders() []string {
 	mu.RLock()
 	defer mu.RUnlock()
-	
+
 	var provs []string
 	for name := range providerMap {
 		provs = append(provs, name)
@@ -266,7 +285,7 @@ func getProvider(name string) *ProviderWrapper {
 func getDefaultProvider() *ProviderWrapper {
 	mu.RLock()
 	defer mu.RUnlock()
-	
+
 	// Priority: Ollama only for MVP
 	priority := []string{"ollama"}
 	for _, name := range priority {
@@ -299,6 +318,12 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get or generate session key
+	sessionKey := req.SessionKey
+	if sessionKey == "" {
+		sessionKey = "webui:" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+
 	// Get provider
 	providerName := req.Provider
 	if providerName == "" {
@@ -313,20 +338,24 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert messages
-	messages := make([]providers.Message, len(req.Messages))
-	for i, msg := range req.Messages {
-		messages[i] = providers.Message{
+	// Load session history
+	history := sessions.GetHistory(sessionKey)
+
+	// Convert new messages and append to history
+	for _, msg := range req.Messages {
+		history = append(history, providers.Message{
 			Role:    msg.Role,
 			Content: msg.Content,
-		}
+		})
+		// Save to session
+		sessions.AddMessage(sessionKey, msg.Role, msg.Content)
 	}
 
 	// Add system prompt if provided
 	if req.SystemPrompt != "" {
-		messages = append([]providers.Message{
+		history = append([]providers.Message{
 			{Role: "system", Content: req.SystemPrompt},
-		}, messages...)
+		}, history...)
 	}
 
 	// Determine model
@@ -336,7 +365,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chatReq := &StreamChatRequest{
-		Messages: messages,
+		Messages: history,
 		Model:    model,
 	}
 
@@ -360,6 +389,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var fullResponse string
 	for chunk := range chunkChan {
 		if chunk.Error != nil {
 			fmt.Fprintf(w, "data: {\"error\": \"%s\"}\n\n", chunk.Error.Error())
@@ -376,7 +406,15 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 
+		fullResponse += chunk.Content
+
 		if chunk.Done {
+			// Save assistant response to session
+			if fullResponse != "" {
+				sessions.AddMessage(sessionKey, "assistant", fullResponse)
+				// Persist session
+				_ = sessions.Save(sessionKey)
+			}
 			break
 		}
 	}
@@ -423,6 +461,98 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+// handleSessions returns list of all sessions
+func handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	entries, err := os.ReadDir(sessionStoragePath)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]SessionInfo{})
+		return
+	}
+
+	var sessionList []SessionInfo
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+
+		// Read session file to get info
+		sessionPath := filepath.Join(sessionStoragePath, entry.Name())
+		data, err := os.ReadFile(sessionPath)
+		if err != nil {
+			continue
+		}
+
+		var sess session.Session
+		if err := json.Unmarshal(data, &sess); err != nil {
+			continue
+		}
+
+		sessionList = append(sessionList, SessionInfo{
+			Key:      sess.Key,
+			Messages: len(sess.Messages),
+			Updated:  sess.Updated.Unix(),
+		})
+	}
+
+	// Sort by updated time (newest first)
+	sort.Slice(sessionList, func(i, j int) bool {
+		return sessionList[i].Updated > sessionList[j].Updated
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessionList)
+}
+
+// handleSessionDetail handles loading or deleting a specific session
+func handleSessionDetail(w http.ResponseWriter, r *http.Request) {
+	// Extract session key from URL path
+	// URL format: /api/sessions/{key}
+	path := r.URL.Path[len("/api/sessions/"):]
+	if path == "" {
+		http.Error(w, "Session key required", http.StatusBadRequest)
+		return
+	}
+
+	// Handle DELETE
+	if r.Method == http.MethodDelete {
+		sessions.TruncateHistory(path, 0)
+		// Delete the session file
+		filename := path
+		// Replace : with _ for filename (as done in session manager)
+		filename = filepath.Join(sessionStoragePath, filename+".json")
+		os.Remove(filename)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"success": true})
+		return
+	}
+
+	// Handle GET - load session messages
+	if r.Method == http.MethodGet {
+		history := sessions.GetHistory(path)
+
+		var messages []ChatMessage
+		for _, msg := range history {
+			messages = append(messages, ChatMessage{
+				Role:    msg.Role,
+				Content: msg.Content,
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(messages)
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -442,6 +572,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		// Get or generate session key
+		sessionKey := req.SessionKey
+		if sessionKey == "" {
+			sessionKey = "webui:" + strconv.FormatInt(time.Now().UnixNano(), 36)
+		}
+
 		// Get provider
 		providerName := req.Provider
 		if providerName == "" {
@@ -456,19 +592,23 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Convert messages
-		messages := make([]providers.Message, len(req.Messages))
-		for i, msg := range req.Messages {
-			messages[i] = providers.Message{
+		// Load session history
+		history := sessions.GetHistory(sessionKey)
+
+		// Convert new messages and append to history
+		for _, msg := range req.Messages {
+			history = append(history, providers.Message{
 				Role:    msg.Role,
 				Content: msg.Content,
-			}
+			})
+			// Save to session
+			sessions.AddMessage(sessionKey, msg.Role, msg.Content)
 		}
 
 		if req.SystemPrompt != "" {
-			messages = append([]providers.Message{
+			history = append([]providers.Message{
 				{Role: "system", Content: req.SystemPrompt},
-			}, messages...)
+			}, history...)
 		}
 
 		model := req.Model
@@ -477,7 +617,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		chatReq := &StreamChatRequest{
-			Messages: messages,
+			Messages: history,
 			Model:    model,
 		}
 
@@ -488,6 +628,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		var fullResponse string
 		for chunk := range chunkChan {
 			if chunk.Error != nil {
 				conn.WriteJSON(ChatResponse{Error: chunk.Error.Error()})
@@ -502,7 +643,15 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 
+			fullResponse += chunk.Content
+
 			if chunk.Done {
+				// Save assistant response to session
+				if fullResponse != "" {
+					sessions.AddMessage(sessionKey, "assistant", fullResponse)
+					// Persist session
+					_ = sessions.Save(sessionKey)
+				}
 				break
 			}
 		}
