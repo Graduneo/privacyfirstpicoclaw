@@ -145,6 +145,31 @@ func (sm *SessionManager) TruncateHistory(key string, keepLast int) {
 	session.Updated = time.Now()
 }
 
+// Delete removes a session from memory and deletes its file from disk.
+// It returns true if the session was found and deleted, false otherwise.
+func (sm *SessionManager) Delete(key string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Check if session exists
+	_, ok := sm.sessions[key]
+	if !ok {
+		return false
+	}
+
+	// Remove from memory
+	delete(sm.sessions, key)
+
+	// Delete file from disk if storage is configured
+	if sm.storage != "" {
+		filename := sanitizeFilename(key)
+		sessionPath := filepath.Join(sm.storage, filename+".json")
+		_ = os.Remove(sessionPath)
+	}
+
+	return true
+}
+
 // sanitizeFilename converts a session key into a cross-platform safe filename.
 // Session keys use "channel:chatID" (e.g. "telegram:123456") but ':' is the
 // volume separator on Windows, so filepath.Base would misinterpret the key.
@@ -165,7 +190,7 @@ func (sm *SessionManager) Save(key string) error {
 	// OS-reserved device names (NUL, COM1 … on Windows).
 	// The extra checks reject "." and any directory separators so that
 	// the session file is always written directly inside sm.storage.
-	if filename == "." || !filepath.IsLocal(filename) || strings.ContainsAny(filename, `/\`) {
+	if filename == "." || !filepath.IsLocal(filename) || strings.ContainsAny(filename, `/\\`) {
 		return os.ErrInvalid
 	}
 

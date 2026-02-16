@@ -521,15 +521,12 @@ func handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 
 	// Handle DELETE
 	if r.Method == http.MethodDelete {
-		sessions.TruncateHistory(path, 0)
-		// Delete the session file
-		filename := path
-		// Replace : with _ for filename (as done in session manager)
-		filename = filepath.Join(sessionStoragePath, filename+".json")
-		os.Remove(filename)
+		// Use the SessionManager's Delete method to properly remove the session
+		// from both memory and disk with correct filename sanitization
+		deleted := sessions.Delete(path)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]bool{"success": true})
+		json.NewEncoder(w).Encode(map[string]bool{"success": deleted})
 		return
 	}
 
